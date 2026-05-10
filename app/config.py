@@ -20,6 +20,11 @@ EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 EMBEDDING_DIMENSION = 384
 FAISS_INDEX_TYPE = "Flat"
 
+# FAISS Index Configuration (Precomputed)
+USE_PRECOMPUTED_INDEX = os.getenv("USE_PRECOMPUTED_INDEX", "0") == "1"
+FAISS_INDEX_PATH = os.getenv("FAISS_INDEX_PATH", "faiss.index")
+PRODUCT_IDS_PATH = os.getenv("PRODUCT_IDS_PATH", "product_ids.json")
+
 # Data Configuration
 from pathlib import Path
 import os

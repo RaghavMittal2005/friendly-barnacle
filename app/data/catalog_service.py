@@ -1,6 +1,7 @@
 import json
 import numpy as np
 import re
+import os
 from typing import List, Dict, Set, Optional
 from sentence_transformers import SentenceTransformer
 import faiss
@@ -21,10 +22,6 @@ class CatalogService:
         print(f"Loading catalog from {json_path}...")
         
         try:
-            # Load embeddings model
-            print("Loading embeddings model...")
-            self.embeddings_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
-            
             # Load JSON
             with open(json_path, 'r', encoding='utf-8') as f:
                 raw_products = json.load(f)
@@ -38,8 +35,20 @@ class CatalogService:
             
             print(f"Loaded {len(self.catalog)} products")
             
-            # Build indexes
-            self._build_faiss_index()
+            # Check if we should use precomputed FAISS index
+            if USE_PRECOMPUTED_INDEX and os.path.exists(FAISS_INDEX_PATH):
+                print("Loading precomputed FAISS index...")
+                self._load_faiss_index(FAISS_INDEX_PATH, PRODUCT_IDS_PATH)
+                print("Precomputed FAISS index loaded ✓")
+            else:
+                # Load embeddings model and build index
+                print("Loading embeddings model...")
+                self.embeddings_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+                self._build_faiss_index()
+                # Save for future use
+                self._save_faiss_index(FAISS_INDEX_PATH, PRODUCT_IDS_PATH)
+            
+            # Build keyword index
             self._build_keyword_index()
             print("Catalog loaded successfully ✓")
             
@@ -192,3 +201,41 @@ class CatalogService:
             pid for pid, p in self.catalog.items()
             if p["category"] == category
         ]
+    
+    def _save_faiss_index(self, faiss_path: str, ids_path: str) -> None:
+        """Save FAISS index and product IDs to disk"""
+        try:
+            if not self.faiss_index:
+                print("Warning: FAISS index not built, skipping save.")
+                return
+            
+            print(f"Saving FAISS index to {faiss_path}...")
+            faiss.write_index(self.faiss_index, faiss_path)
+            
+            print(f"Saving product IDs to {ids_path}...")
+            with open(ids_path, 'w', encoding='utf-8') as f:
+                json.dump(self.product_ids, f)
+            
+            print("FAISS index saved successfully ✓")
+        except Exception as e:
+            print(f"Error saving FAISS index: {e}")
+    
+    def _load_faiss_index(self, faiss_path: str, ids_path: str) -> None:
+        """Load precomputed FAISS index and product IDs from disk"""
+        try:
+            if not os.path.exists(faiss_path):
+                raise FileNotFoundError(f"FAISS index not found: {faiss_path}")
+            if not os.path.exists(ids_path):
+                raise FileNotFoundError(f"Product IDs file not found: {ids_path}")
+            
+            print(f"Loading FAISS index from {faiss_path}...")
+            self.faiss_index = faiss.read_index(faiss_path)
+            
+            print(f"Loading product IDs from {ids_path}...")
+            with open(ids_path, 'r', encoding='utf-8') as f:
+                self.product_ids = json.load(f)
+            
+            print(f"Loaded {len(self.product_ids)} product IDs ✓")
+        except Exception as e:
+            print(f"Error loading FAISS index: {e}")
+            raise
