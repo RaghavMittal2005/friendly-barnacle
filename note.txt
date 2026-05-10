@@ -1,0 +1,17 @@
+## ends convo only when user is satisfied or says so he's done . don't end convo
+after giving recommendation
+
+## at the end when user is done or thanks then give brief summary or give note 
+that this recommendation not exactly what you came for .(in last give same recc as previous)
+
+
+## if he is specific like rust coder then maybe more focus on keyword based
+or if he is asking in general what should he look for ask recoomendation then more focus on
+semantic
+
+## user might ask to compare between tests
+
+## user might ask one test for one skill then to add some other skills as wells so 
+give both combined
+
+## user might list multiple requirements ask him the priority list

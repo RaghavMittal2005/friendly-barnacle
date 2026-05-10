@@ -1,0 +1,28 @@
+# Environment variables
+.env
+.env.*
+shl_agent/env/
+shl_agent/.env/
+# Python virtual environments
+venv/
+.venv/
+shl_agent/venv/
+shl_agent/.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Jupyter
+.ipynb_checkpoints/
+
+# VS Code
+.vscode/
+
+# Mac/Linux
+.DS_Store
+
+# Logs
+*.log
