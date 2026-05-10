@@ -3,7 +3,6 @@ import numpy as np
 import re
 import os
 from typing import List, Dict, Set, Optional
-from sentence_transformers import SentenceTransformer
 import faiss
 from app.config import *
 
@@ -37,16 +36,10 @@ class CatalogService:
             
             # Check if we should use precomputed FAISS index
             if USE_PRECOMPUTED_INDEX and os.path.exists(FAISS_INDEX_PATH):
-                print("Loading precomputed FAISS index...")
+                print("🚀 Precomputed mode - SKIPPING embedding model (saves ~2GB RAM)")
                 self._load_faiss_index(FAISS_INDEX_PATH, PRODUCT_IDS_PATH)
                 print("Precomputed FAISS index loaded ✓")
-            else:
-                # Load embeddings model and build index
-                print("Loading embeddings model...")
-                self.embeddings_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
-                self._build_faiss_index()
-                # Save for future use
-                self._save_faiss_index(FAISS_INDEX_PATH, PRODUCT_IDS_PATH)
+            
             
             # Build keyword index
             self._build_keyword_index()
@@ -119,7 +112,11 @@ class CatalogService:
         return list(set(keywords))[:20]
     
     def _build_faiss_index(self) -> None:
-        """Generate embeddings & build FAISS index"""
+        """Generate embeddings & build FAISS index (only in dev mode)"""
+        if not self.embeddings_model:
+            print("⚠️  Skipping FAISS build: embedding model not loaded")
+            return
+        
         print("Building FAISS index...")
         
         texts = [p["description"] for p in self.catalog.values()]
@@ -173,16 +170,21 @@ class CatalogService:
     
     def search_by_semantic(self, query: str, top_k: int = 10) -> List[str]:
         """Semantic search using FAISS"""
-        if not self.faiss_index:
+        # In precomputed mode, embedding model is not loaded - skip semantic search
+        if not self.faiss_index or not self.embeddings_model:
             return []
         
-        query_embedding = self.embeddings_model.encode(query, convert_to_numpy=True)
-        distances, indices = self.faiss_index.search(
-            np.array([query_embedding], dtype=np.float32),
-            k=min(top_k, len(self.product_ids))
-        )
-        
-        return [self.product_ids[i] for i in indices[0]]
+        try:
+            query_embedding = self.embeddings_model.encode(query, convert_to_numpy=True)
+            distances, indices = self.faiss_index.search(
+                np.array([query_embedding], dtype=np.float32),
+                k=min(top_k, len(self.product_ids))
+            )
+            
+            return [self.product_ids[i] for i in indices[0]]
+        except Exception as e:
+            print(f"Error in semantic search: {e}")
+            return []
     
     def get_product(self, product_id: str) -> Optional[Dict]:
         """Retrieve full product details"""
