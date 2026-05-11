@@ -1,3 +1,4 @@
+import re
 from typing import List, Dict, Optional
 from app.data.catalog_service import CatalogService
 from app.ai.llm_service import LLMService
@@ -14,37 +15,44 @@ class ConversationManager:
         self.max_turns = 8
     
     def process_message(self,
-                       user_message: str,
-                       conversation_history: List[Dict]) -> Dict:
-        """
-        Main routing: detect intent and execute corresponding behavior
-        """
-        
-        turn_count = len(conversation_history) // 2
-        
-        # Check for end signals
-        if self._is_end_signal(user_message) or turn_count >= self.max_turns:
-            return self._handle_conversation_end(conversation_history, user_message)
-        
-        # Detect intent
-        intent = self._detect_intent(user_message, conversation_history)
-        
-        # Route to behavior
+                   user_message: str,
+                   conversation_history: List[Dict]) -> Dict:
+    
+     history = list(conversation_history)
+    
+     turn_count = len(history) // 2
+
+     if self._is_end_signal(user_message) or turn_count >= self.max_turns:
+        result = self._handle_conversation_end(history, user_message)
+     else:
+        intent = self._detect_intent(user_message, history)
+
         if intent == "clarify":
-            return self._handle_clarification(user_message)
+            result = self._handle_clarification(user_message)
         elif intent == "recommend":
-            return self._handle_recommendation(user_message, conversation_history)
+            result = self._handle_recommendation(user_message, history)
         elif intent == "refine":
-            return self._handle_refinement(user_message, conversation_history)
+            result = self._handle_refinement(user_message, history)
         elif intent == "compare":
-            return self._handle_comparison(user_message, conversation_history)
+            result = self._handle_comparison(user_message, history)
         else:
-            return self._handle_clarification(user_message)
+            result = self._handle_clarification(user_message)
+
+    # Append BOTH turns AFTER generating the reply
+     history.append({"role": "user", "content": user_message})
+     history.append({"role": "assistant", "content": result["reply"]})
+
+     result["conversation_history"] = history  # return it to caller
+     return result
     
     def _detect_intent(self, user_msg: str, history: List[Dict]) -> str:
         """Classify user intent"""
         
         msg_lower = user_msg.lower()
+        is_refinement = any(
+            word in msg_lower
+            for word in ["also", "add", "plus", "include", "besides", "instead", "remove", "shorter", "longer"]
+        )
         
         # STOP asking questions after first exchange - just recommend!
         # If we have multiple turns in history, user already responded to something
@@ -52,6 +60,8 @@ class ConversationManager:
             # Check for comparison request
             if any(word in msg_lower for word in ["compare", "difference", "vs ", "versus"]):
                 return "compare"
+            if is_refinement:
+                return "refine"
             # Otherwise always recommend - don't ask more questions
             return "recommend"
         
@@ -60,7 +70,7 @@ class ConversationManager:
             return "compare"
         
         # Check for refinement
-        if any(word in msg_lower for word in ["also", "add", "plus", "include", "besides"]):
+        if is_refinement:
             if len(history) > 0:  # Has context
                 return "refine"
         
@@ -117,10 +127,10 @@ class ConversationManager:
                 "end_of_conversation": False
             }
         
-        # Get LLM recommendations
-        summary = self._summarize_conversation(history, user_message)
+        # Get LLM recommendations with full conversation history
         recommendations = self.llm.get_recommendations(
-            summary,
+            history,
+            user_message,
             candidates,
             max_recommendations=10
         )
@@ -143,10 +153,11 @@ class ConversationManager:
         if not prev_recs:
             return self._handle_recommendation(user_message, history)
         
-        # Refine with LLM
+        # Refine with LLM using full conversation history
         refined = self.llm.refine_recommendations(
-            prev_recs,
+            history,
             user_message,
+            prev_recs,
             self.catalog.catalog
         )
         
@@ -185,11 +196,12 @@ class ConversationManager:
                 "end_of_conversation": False
             }
         
-        # Determine aspect
-        aspect = self._extract_comparison_aspect(user_message)
-        
-        # Get comparison
-        comparison = self.llm.compare_products(products, aspect)
+        # Get comparison with full conversation history
+        comparison = self.llm.compare_products(
+            history,
+            user_message,
+            products
+        )
         
         return {
             "reply": comparison,
@@ -210,11 +222,6 @@ class ConversationManager:
     
     # Helper methods
     
-    def _summarize_conversation(self, history: List[Dict], current_msg: str) -> str:
-        """Build summary of conversation for LLM"""
-        
-        all_text = " ".join([m.get('content', '') for m in history] + [current_msg])
-        return all_text[:500]  # Limit to first 500 chars
     
     def _format_recommendations_reply(self, recommendations: List[Dict]) -> str:
         """Format recommendations as readable text"""
@@ -222,8 +229,20 @@ class ConversationManager:
         if not recommendations:
             return "I couldn't generate recommendations at this time. Could you provide more details?"
         
-        lines = ["Here are the assessments I recommend:\n"]
-        
+        lines = ["Here are the assessments I recommend:"]
+        for index, rec in enumerate(recommendations, 1):
+            product_id = rec.get("id")
+            product = self.catalog.get_product(product_id) if product_id else None
+            if not product:
+                continue
+
+            reason = rec.get("reason", "Matches your requirements")
+            duration = product.get("duration_minutes")
+            duration_text = f"{duration} min" if duration else "Duration not listed"
+            lines.append(
+                f"{index}. [{product_id}] {product['name']} - {reason} "
+                f"({product['category']}, {duration_text})"
+            )
         
         return "\n".join(lines)
     
@@ -248,17 +267,39 @@ class ConversationManager:
     
     def _extract_previous_recommendations(self, history: List[Dict]) -> List[Dict]:
         """Try to extract previous recommendations from history"""
-        # Simplified: return empty list, would need to parse assistant messages
-        return []
+        recs = []
+        seen = set()
+
+        for message in history:
+            if message.get("role") != "assistant":
+                continue
+
+            content = message.get("content", "")
+            for product_id in re.findall(r"\[([^\]]+)\]", content):
+                if product_id in self.catalog.catalog and product_id not in seen:
+                    seen.add(product_id)
+                    recs.append({
+                        "id": product_id,
+                        "reason": "Previously recommended in this conversation"
+                    })
+
+        return recs
     
     def _extract_product_ids(self, user_message: str, history: List[Dict]) -> List[str]:
         """Extract product IDs mentioned by user"""
-        # Look for product names/IDs in message
+        # Look for product names/IDs in the latest message and prior assistant replies.
         product_ids = []
-        msg_lower = user_message.lower()
+        combined_text = " ".join(
+            [user_message] + [m.get("content", "") for m in history]
+        )
+        msg_lower = combined_text.lower()
+        
+        for product_id in re.findall(r"\[([^\]]+)\]", combined_text):
+            if product_id in self.catalog.catalog and product_id not in product_ids:
+                product_ids.append(product_id)
         
         for product_id, product in self.catalog.catalog.items():
-            if product['name'].lower() in msg_lower:
+            if product_id not in product_ids and product['name'].lower() in msg_lower:
                 product_ids.append(product_id)
         
         return product_ids[:3]

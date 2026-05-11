@@ -24,8 +24,7 @@ class LLMService:
 Understand user's query without any assumptions.Then Ask 1-2 targeted clarifying questions to better understand user's requirements. For Example like these:
 1. Job seniority level (Entry-Level, Mid-Level, Senior, Executive)
 2. Skills focus (Technical Skills, Behavioral/Leadership, Cognitive Ability, or combination)
-3. Which Depaartment
-4. Which language if any assistant type role(eg. HR,receptionist,admin assistant)
+3. Which language if any assistant type role(eg. HR,receptionist,admin assistant)
 
 Be concise and friendly. Do NOT recommend anything yet. Keep response under 100 words."""
         
@@ -46,14 +45,18 @@ Be concise and friendly. Do NOT recommend anything yet. Keep response under 100 
             return "I'd like to help you find the right assessment. Could you tell me the job seniority level and whether this is for selection or development?"
     
     def get_recommendations(self, 
-                           conversation_summary: str,
+                           conversation_history: List[Dict],
+                           user_message: str,
                            candidate_products: List[Dict],
                            max_recommendations: int = 10) -> List[Dict]:
         """Behavior 2: Select best products"""
         
         products_text = self._format_products_for_llm(candidate_products[:20])
         
-        system_prompt = f"""You are an SHL assessment expert. Based on the hiring need, select the best {max_recommendations} products from the candidates list below.
+        # Extract context from conversation history
+        context_summary = self._build_context_summary(conversation_history, user_message)
+        
+        system_prompt = f"""You are an SHL assessment expert. Based on the FULL conversation history provided below and the current requirement, select the best {max_recommendations} products from the candidates list.
 
 CRITICAL RULES:
 1. Return ONLY products that appear in the list below
@@ -62,23 +65,37 @@ CRITICAL RULES:
 4. Return ONLY valid JSON, no other text
 
 Your response must be valid JSON in this exact format:
-{{"recommendations": [{{"id": "4094", "reason": "Measures .NET/MVC expertise for mid-level developers"}}, ...]}}"""
+{{"recommendations": [{{"id": "4094", "reason": "Measures .NET/MVC expertise for mid-level developers"}}, ...]}}
+
+CONTEXT FROM CONVERSATION:
+{context_summary}"""
         
-        user_message = f"""Hiring Need:
-{conversation_summary}
+        messages = []
+        messages.append({
+            "role": "system",
+            "content": system_prompt
+        })
+        
+        messages.extend(self._format_history_messages(conversation_history))
+        
+        # Add current user message with products context
+        current_request = f"""Current requirement:
+{user_message}
 
 Candidate Products (select from these only):
 {products_text}
 
 Return JSON with best {max_recommendations} products."""
         
+        messages.append({
+            "role": "user",
+            "content": current_request
+        })
+        
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message}
-                ],
+                messages=messages,
                 temperature=0.3,
                 max_tokens=1000
             )
@@ -96,8 +113,9 @@ Return JSON with best {max_recommendations} products."""
         return []
     
     def refine_recommendations(self,
+                              conversation_history: List[Dict],
+                              user_message: str,
                               current_recommendations: List[Dict],
-                              new_constraint: str,
                               all_products: Dict[str, Dict]) -> List[Dict]:
         """Behavior 3: Refine recommendations"""
         
@@ -107,26 +125,37 @@ Return JSON with best {max_recommendations} products."""
             if r['id'] in all_products
         ])
         
-        system_prompt = """You are an SHL assessment expert. The user has added a new requirement.
+        system_prompt = """You are an SHL assessment expert. Based on the full conversation history, the user has added a new requirement.
 Update the recommendation list accordingly. You can add, remove, or reorder products.
 Keep 1-10 recommendations total.
 
 Return JSON: {"recommendations": [{"id": "...", "reason": "..."}]}"""
         
-        user_message = f"""Current recommendations:
+        messages = []
+        messages.append({
+            "role": "system",
+            "content": system_prompt
+        })
+        
+        messages.extend(self._format_history_messages(conversation_history))
+        
+        # Add current refinement request
+        refinement_request = f"""Current recommendations:
 {current_text}
 
-New requirement added by user: {new_constraint}
+New requirement from user: {user_message}
 
 Update and return the refined list as JSON."""
+        
+        messages.append({
+            "role": "user",
+            "content": refinement_request
+        })
         
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message}
-                ],
+                messages=messages,
                 temperature=0.3,
                 max_tokens=1000
             )
@@ -142,24 +171,40 @@ Update and return the refined list as JSON."""
         return current_recommendations
     
     def compare_products(self,
-                        products: List[Dict],
-                        comparison_aspect: str) -> str:
+                        conversation_history: List[Dict],
+                        comparison_request: str,
+                        products: List[Dict]) -> str:
         """Behavior 4: Compare products"""
         
         products_text = self._format_products_for_llm(products)
         
-        system_prompt = f"""You are an SHL assessment expert. Compare these products on: {comparison_aspect}
-
+        system_prompt = f"""You are an SHL assessment expert. Compare these products based on the user's request and full conversation context.
 Ground your comparison ONLY in the catalog data provided below. Do not speculate or add information not in the catalog.
 Be specific and factual."""
+        
+        messages = []
+        messages.append({
+            "role": "system",
+            "content": system_prompt
+        })
+        
+        messages.extend(self._format_history_messages(conversation_history))
+        
+        # Add comparison request
+        comparison_msg = f"""User's comparison request: {comparison_request}
+
+Products to compare:
+{products_text}"""
+        
+        messages.append({
+            "role": "user",
+            "content": comparison_msg
+        })
         
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": products_text}
-                ],
+                messages=messages,
                 temperature=0.5,
                 max_tokens=500
             )
@@ -180,4 +225,28 @@ Be specific and factual."""
             lines.append(f"   {p['description'][:120]}...")
             lines.append("")
         
+        return "\n".join(lines)
+
+    def _format_history_messages(self, conversation_history: List[Dict]) -> List[Dict]:
+        """Convert stored history to chat messages accepted by the LLM API."""
+        messages = []
+        for msg in conversation_history:
+            role = msg.get("role", "user")
+            if role not in {"user", "assistant"}:
+                role = "user"
+
+            content = str(msg.get("content", "")).strip()
+            if content:
+                messages.append({"role": role, "content": content})
+
+        return messages
+
+    def _build_context_summary(self, conversation_history: List[Dict], user_message: str) -> str:
+        """Build a compact readable conversation summary for the system prompt."""
+        lines = []
+        for msg in self._format_history_messages(conversation_history):
+            role = "User" if msg["role"] == "user" else "Assistant"
+            lines.append(f"{role}: {msg['content']}")
+
+        lines.append(f"Current user request: {user_message}")
         return "\n".join(lines)

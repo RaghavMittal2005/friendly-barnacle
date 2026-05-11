@@ -1,9 +1,10 @@
 import os
+from uuid import uuid4
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 import uvicorn
 from app.config import *
-from app.models import ChatRequest, ChatResponse, HealthResponse, Message
+from app.models import ChatRequest, ChatResponse, HealthResponse, Message, MessageRole,r,save_history,delete_history,get_history
 from app.data.catalog_service import CatalogService
 from app.ai.llm_service import LLMService
 from app.logic.conversation_manager import ConversationManager
@@ -60,51 +61,45 @@ async def health_check():
         llm_available=llm_service is not None
     )
 
+
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    """
-    Process user message and return agent response.
-    
-    Takes: Full conversation history
-    Returns: Agent reply + recommendations + end_of_conversation flag
-    """
     try:
-        # Validation
-        if not request.messages:
-            raise HTTPException(status_code=400, detail="No messages provided")
-        
-        if len(request.messages) > MAX_CONVERSATION_TURNS:
+        # Load or create session
+        session_id = request.session_id or str(uuid4())
+        history = get_history(session_id)
+
+        if len(history) > MAX_CONVERSATION_TURNS * 2:
             raise HTTPException(status_code=400, detail=f"Max {MAX_CONVERSATION_TURNS} turns exceeded")
-        
-        # Get latest user message
-        user_message = request.messages[-1].content
-        
-        # Convert to conversation history (exclude last message)
-        history = [
-            {"role": m.role.value, "content": m.content}
-            for m in request.messages[:-1]
-        ]
-        
-        # Process with conversation manager
-        result = conversation_manager.process_message(user_message, history)
-        
-        # Build response
-        response = ChatResponse(
+
+        # Process message
+        result = conversation_manager.process_message(request.message, history)
+
+        # Append both turns and save
+        history.append({"role": "user",      "content": request.message})
+        history.append({"role": "assistant", "content": result["reply"]})
+        save_history(session_id, history)
+
+        # Clear session if conversation ended
+        if result["end_of_conversation"]:
+            delete_history(session_id)
+
+        return ChatResponse(
             reply=result["reply"],
             recommendations=result["recommendations"],
-            end_of_conversation=result["end_of_conversation"]
+            end_of_conversation=result["end_of_conversation"],
+            session_id=session_id
         )
-        
-        return response
-    
+
     except HTTPException:
         raise
     except Exception as e:
         print(f"ERROR in /chat: {e}")
         return ChatResponse(
-            reply="I encountered an error processing your request. Please try again.",
+            reply="I encountered an error. Please try again.",
             recommendations=[],
-            end_of_conversation=False
+            end_of_conversation=False,
+            session_id=request.session_id or str(uuid4())
         )
 
 @app.get("/")
